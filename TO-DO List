@@ -1,0 +1,9 @@
+| 🔧 Component              | 🔌 Location                    | 🛡️ Purpose                          | ✅ Needed?   |
+| ------------------------- | ------------------------------ | ------------------------------------ | ----------- |
+| 0.1 µF ceramic caps (×2)  | VCC–GND on each ACS712         | Stable current sensing               | ✅ Yes       |
+| 3.5–4A fuse or polyfuse   | 24V input to MD10C             | Prevent fire hazard or driver damage | ✅ Yes       |
+| TVS diode (P6KE30A)       | Across 24V & GND (MD10C input) | Protect from voltage spikes          | ✅ Yes       |
+| Flyback diodes (1N5822)   | Across motor terminals         | Suppress inductive spikes            | ✅ Yes\*     |
+| Pull-down resistors (10k) | DIR and PWM to GND             | Prevent floating signal pins         | ✅ Yes       |
+| NTC thermistor            | In series with power input     | Limit inrush current                 | ⚠️ Optional |
+| Overtemp sensor           | On MD10C or motor casing       | Shut down on overheating             | ⚠️ Optional |
