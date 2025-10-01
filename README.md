@@ -1,0 +1,1 @@
+This project details a module designed to allow two AutoSlide/MultiDrive motors to operate under the parameters of one controller. The module reads the current of the motor circuit to determine both direction and load. This is then used within a PID loop monitoring the current and direction of a second "slave" motor, with its own power supply.
