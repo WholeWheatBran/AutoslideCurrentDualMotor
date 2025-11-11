@@ -9,11 +9,12 @@
   ---------------------------
 
   Update Log:
-  - 6/13/25: V0.01 - Adapted from old voltage emulator module. Monitors current and distributes load between two motors
-  - 11/7/25: V0.05 - Tweaked PID to decrease oscillations in belt caused by master-slave current difference. Increased d and slightly increased filtering.
+  - 06/13/25: V0.01 - Adapted from old voltage emulator module. Monitors current and distributes load between two motors
+  - 11/07/25: V0.05 - Tweaked PID to decrease oscillations in belt caused by master-slave current difference. Increased d and slightly increased filtering.
+  - 11/11/25: V0.06 - Added PD_Alpha to linearly adjust P and D for different load. Future improvement can be adjusting this with physical dial.
 */
 
-#define VERSION_NUMBER 0.05
+#define VERSION_NUMBER 0.06
 
 #include <avr/wdt.h>
 #include <Wire.h>
@@ -32,9 +33,10 @@
 // PID Gains (These are crucial and will need tuning!)
 // Start with Ki=0, Kd=0. Tune Kp first. Increase Kp until response is good but not oscillating.
 // Then increase Ki slowly to eliminate steady-state error. Then increase Kd slowly to dampen oscillations.
-#define Kp_current 0.35      // Proportional Gain
-#define Ki_current 0.001     // Integral Gain
-#define Kd_current 0.0155    // Derivative Gain (start at 0, add if needed for stability)
+#define PD_ALPHA 1.0		  			 // Linear adjustment for P and D based on variable load tests - set lower for lower drag (e.g. 0.5)
+float Kp_current = 0.35 * PD_ALPHA;      // Proportional Gain
+#define Ki_current 0.001      			 // Integral Gain
+float Kd_current = 0.0155 * PD_ALPHA;    // Derivative Gain (start at 0, add if needed for stability)
 
 // SETTINGS
 
