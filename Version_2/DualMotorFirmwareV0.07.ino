@@ -1,0 +1,214 @@
+/*
+   AUTOSLIDE DUAL MOTOR MODULE
+   Designed by Austen Brandon Lee, 2025
+   Meant for replicating current using ATM3.9B from one motor to another motor.
+
+   Circuit Diagram Overview
+   ========================
+  
+  ---------------------------
+
+  Update Log:
+  - 06/13/25: V0.01 - Adapted from old voltage emulator module. Monitors current and distributes load between two motors
+  - 11/07/25: V0.05 - Tweaked PID to decrease oscillations in belt caused by master-slave current difference. Increased d and slightly increased filtering.
+  - 11/11/25: V0.06 - Added PD_Alpha to linearly adjust P and D for different load. Future improvement can be adjusting this with physical dial.
+  - 11/20/25: V0.07 - Added analog dial to A3 to allow manual tuning of PD_ALPHA without needing to reflash.
+*/
+
+#define VERSION_NUMBER 0.07
+
+#include <avr/wdt.h>
+#include <Wire.h>
+
+// SETTINGS
+
+#define MASTER_SLAVE_SHARING 50         // PERCENT. Percentage of total load taken by master. 50 means 50% (equally shared). DO NOT SET TO 0. Smaller values mean slave does more.
+
+#define RAW_CURRENT_DEADZONE 50         // mA. Zero out current readings below this level.
+#define CURRENT_FILTERING_ALPHA 0.05    // Smoothing factor (0 = heavy smoothing, 1 = no smoothing)
+#define FILTERED_CURRENT_DEADZONE 20    // mA. Zero out filtered current readings below this level.
+
+#define MAX_CURRENT_MA 5000             // mA. The max current magnitude in the master motor. May be constrained by the INA219 somewhat
+#define MIN_EFFECTIVE_PWM 30            // The minimum PWM given to the slave motor during movement
+
+// PID Gains (These are crucial and will need tuning!)
+// Start with Ki=0, Kd=0. Tune Kp first. Increase Kp until response is good but not oscillating.
+// Then increase Ki slowly to eliminate steady-state error. Then increase Kd slowly to dampen oscillations.
+float PD_ALPHA = 1.0;		  			 // Linear adjustment for P and D based on variable load tests - set lower for lower drag (e.g. 0.5)
+float Kp_current = 0.35;      // Proportional Gain
+#define Ki_current 0.001      			 // Integral Gain
+float Kd_current = 0.0155;    // Derivative Gain (start at 0, add if needed for stability)
+
+// SETTINGS
+
+// PINS
+#define PWM 9     // PWM output
+#define DIR 10    // DIR output
+#define MASTER_CURRENT_PIN A0
+#define SLAVE_CURRENT_PIN A1
+#define DIAL A3
+// PINS
+
+// ACS712 SETUPS
+#define ACS_ZERO 516            // ACS712 zero-current raw ADC value (adjust based on calibration)
+#define ACS_SENSITIVITY 0.185   // V/A for ACS712-5A version (adjust if using 20A or 30A)
+#define ADC_TO_VOLT 5.0 / 1023.0
+// ACS712 SETUPS
+
+// Filtered values
+float filtered_Master_Current = 0.0;
+float filtered_Slave_Current = 0.0;
+// Filtered values
+
+// Status variables
+bool isMoving = false;
+bool currentDirection = true;
+
+// PID Controller state variables
+float integral_sum = 0.0;
+float previous_current_error = 0.0;
+unsigned long last_loop_time_ms = 0;  // To calculate DeltaTime for PID
+float MAX_INTEGRAL_SUM = 500.0; // Anti-windup for integral term (prevents integral_sum from growing too large)
+float previous_d_term = 0;
+float d_term_alpha = 0.175;
+
+
+void setup() {
+	pinMode(PWM, OUTPUT);
+	pinMode(DIR, OUTPUT);
+
+  // Set Timer1 (pins 9 & 10) to ~31.4 kHz PWM by using no prescaling (prescaler = 1); this is to avoid whine noise
+  TCCR1B = TCCR1B & 0b11111000 | 0x01;
+  
+	Serial.begin(9600);
+  Wire.begin();
+  Serial.print("Autoslide Dual Motor Driver Version "); Serial.println(VERSION_NUMBER);
+
+  delay(100); // To give time for everything to settle
+
+  last_loop_time_ms = millis();
+  wdt_enable(WDTO_2S); // Start watchdog, dat dog, dat diggity dog
+}
+
+bool wasMoving, oldDirection; // Just used for output debugging
+float current_pwm = 0.0; // Tracks last applied PWM
+unsigned long lastPrintTime = 0; // Output debugging only
+
+void loop() {
+  wdt_reset(); // Reset watchdog
+
+  // For use in PID loop
+  unsigned long current_time_ms = millis();
+  float delta_time_sec = (current_time_ms - last_loop_time_ms) / 1000.0; // Convert ms to seconds
+  delta_time_sec = constrain(delta_time_sec, 0.001, 0.1); // Clamp to avoid large values if stalled
+  last_loop_time_ms = current_time_ms;
+  PD_ALPHA = (0.95 * PD_ALPHA) + (0.05 * ((analogRead(DIAL) * 1.15 / 1024.0) + 0.05));
+  //Serial.println(PD_ALPHA);
+
+  // Get current readings
+  float raw_Master_Current = readCurrent(MASTER_CURRENT_PIN);
+  raw_Master_Current = ( (abs(raw_Master_Current) < RAW_CURRENT_DEADZONE) ? 0 : raw_Master_Current);
+  filtered_Master_Current = CURRENT_FILTERING_ALPHA * raw_Master_Current + (1 - CURRENT_FILTERING_ALPHA) * filtered_Master_Current;
+  filtered_Master_Current = ( (abs(filtered_Master_Current) < FILTERED_CURRENT_DEADZONE) ? 0 : filtered_Master_Current);
+
+  float raw_Slave_Current = readCurrent(SLAVE_CURRENT_PIN);
+  raw_Slave_Current = ( (abs(raw_Slave_Current) < RAW_CURRENT_DEADZONE) ? 0 : raw_Slave_Current);
+  filtered_Slave_Current = CURRENT_FILTERING_ALPHA * raw_Slave_Current + (1 - CURRENT_FILTERING_ALPHA) * filtered_Slave_Current;
+  filtered_Slave_Current = ( (abs(filtered_Slave_Current) < FILTERED_CURRENT_DEADZONE) ? 0 : filtered_Slave_Current);
+
+  // Update status variables
+  isMoving = abs(filtered_Master_Current) > 0; // False means not moving, true means moving
+  if (isMoving) currentDirection = filtered_Master_Current > 0;
+
+  // Output status updates
+  if (isMoving != wasMoving || currentDirection != oldDirection) {
+    if (isMoving) {
+      Serial.print("Motor is moving "); Serial.println(currentDirection ? "forward." : "backward.");
+    } else {
+      Serial.println("Motor stopped moving.");
+    }
+    if (currentDirection != oldDirection && isMoving) {
+      analogWrite(PWM, 0);     // Briefly stop PWM
+      delay(5);  // Allow DIR pin to settle
+    }
+    wasMoving = isMoving;
+    oldDirection = currentDirection;
+  }
+
+  // --- STOP / PID RESET LOGIC ---
+  // This critical block runs if the master motor is considered stopped.
+  if (!isMoving) {
+      analogWrite(PWM, 0); // Stop slave motor
+      digitalWrite(DIR, LOW); // Set DIR to a default safe state (e.g., LOW)
+
+      // Reset PID state to prevent integral windup or "jump" when motor restarts. This ensures a smooth start from zero for the slave.
+      integral_sum = 0.0;
+      previous_current_error = 0.0;
+      previous_d_term = 0.0;
+      current_pwm = 0;
+      last_loop_time_ms = millis(); // Reset time for next calculation (prevents large delta_time_sec)
+      return; // Exit loop early; no further calculations needed if not moving
+  }
+
+  // Calculate PID error
+  // If master takes X%, slave takes (100-X)% of total load. So we want the slave's current to match that ratio.
+  float target_Slave_Current = filtered_Master_Current * ( (100.0-MASTER_SLAVE_SHARING) / MASTER_SLAVE_SHARING );
+  float current_error = target_Slave_Current - filtered_Slave_Current;
+
+  // Proportional Term
+  float p_term = Kp_current*PD_ALPHA * current_error;
+
+  // Integral Term (with anti-windup)
+  integral_sum = integral_sum + current_error * delta_time_sec;
+  integral_sum = constrain(integral_sum, -MAX_INTEGRAL_SUM, MAX_INTEGRAL_SUM); // Anti-windup
+  float i_term = Ki_current * integral_sum;
+
+  // Derivative Term
+  float raw_d_term = Kd_current*PD_ALPHA * (current_error - previous_current_error) / delta_time_sec;
+  previous_d_term = previous_d_term * (1 - d_term_alpha) + raw_d_term * d_term_alpha;
+  float d_term = previous_d_term;
+  previous_current_error = current_error;
+
+  // Calculate PID output (this is a change in PWM duty cycle)
+  float current_delta = p_term + i_term + d_term; // in mA, this is the difference needed. Can be positive or negative
+  
+  // Convert to PWM
+  float clamped_delta = constrain(current_delta, -MAX_CURRENT_MA, MAX_CURRENT_MA);
+  float pwm_delta = (clamped_delta / MAX_CURRENT_MA) * 255.0f;
+
+  current_pwm += pwm_delta; // Apply the delta
+  current_pwm = constrain(current_pwm, -255, 255);
+  
+  // Enforce minimum effective PWM (in either direction)
+  if (current_pwm > 0 && current_pwm < MIN_EFFECTIVE_PWM) {
+    current_pwm = MIN_EFFECTIVE_PWM;
+  } else if (current_pwm < 0 && current_pwm > -MIN_EFFECTIVE_PWM) {
+    current_pwm = -MIN_EFFECTIVE_PWM;
+  }
+
+  // Set DIR based on sign of PWM
+  digitalWrite(DIR, current_pwm >= 0 ? LOW : HIGH);
+
+  // Write the absolute PWM value
+  analogWrite(PWM, (int)abs(current_pwm));
+
+  // OUTPUT DEBUGGING SECTION
+  if (current_time_ms - lastPrintTime >= 500) {
+    //Serial.print("Master current: "); Serial.println(filtered_Master_Current);
+    //Serial.print("Slave current: "); Serial.println(filtered_Slave_Current);
+    Serial.print("Current difference: "); Serial.println(filtered_Slave_Current - filtered_Master_Current);
+    Serial.print("Slave PWM output: "); Serial.println(current_pwm);
+
+    lastPrintTime = current_time_ms;
+  }
+  
+}
+
+// Reads ACS712 sensor and returns current in mA
+float readCurrent(int pin) {
+  int raw = analogRead(pin);
+  float voltage = raw * ADC_TO_VOLT;
+  float deltaV = voltage - (ACS_ZERO * ADC_TO_VOLT);
+  float currentA = deltaV / ACS_SENSITIVITY;
+  return currentA * 1000.0;
+}
